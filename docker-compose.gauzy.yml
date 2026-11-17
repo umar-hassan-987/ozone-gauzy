@@ -1,0 +1,80 @@
+# ------------------------------------------------------------------
+# Ever Gauzy - lean self-hosted setup
+# API + Web UI + PostgreSQL (+ optional Cloudflare Tunnel)
+#
+# Based on the official docker-compose.demo.yml, but:
+#   - runs in production mode (no demo data, no public default logins)
+#   - Postgres is NOT published on 5432, so it can't clash with n8n's DB
+#   - 3000 / 4200 are bound to 127.0.0.1 only (not open to your Wi-Fi)
+#   - all settings live in one file: .env.gauzy
+#
+# Start (local test):    docker compose -f docker-compose.gauzy.yml up -d
+# Start (team online):   docker compose -f docker-compose.gauzy.yml --profile public up -d
+# Logs:                  docker compose -f docker-compose.gauzy.yml logs -f api
+# Stop (keeps data):     docker compose -f docker-compose.gauzy.yml stop
+# ------------------------------------------------------------------
+name: gauzy
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: gauzy-db
+    restart: unless-stopped
+    env_file: [.env.gauzy]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - gauzy_pg:/var/lib/postgresql/data/
+    networks: [gauzy]
+
+  api:
+    image: ghcr.io/ever-co/gauzy-api:latest
+    container_name: gauzy-api
+    restart: unless-stopped
+    env_file: [.env.gauzy]
+    entrypoint: './entrypoint.compose.sh'
+    command: ['node', 'main.js']
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - '3000:3000'
+    networks: [gauzy]
+
+  webapp:
+    image: ghcr.io/ever-co/gauzy-webapp:latest
+    container_name: gauzy-webapp
+    restart: unless-stopped
+    env_file: [.env.gauzy]
+    entrypoint: './entrypoint.compose.sh'
+    command: ['nginx', '-g', 'daemon off;']
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_started
+    ports:
+      - '4200:4200'
+    networks: [gauzy]
+
+  # Only starts when you add:  --profile public
+  # Puts the API and web UI on your own domain over HTTPS, without opening router ports.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: gauzy-tunnel
+    restart: unless-stopped
+    profiles: [public]
+    env_file: [.env.gauzy] # reads TUNNEL_TOKEN
+    command: tunnel --no-autoupdate run
+    depends_on: [api, webapp]
+    networks: [gauzy]
+
+volumes:
+  gauzy_pg: {}
+
+networks:
+  gauzy:
+    driver: bridge
